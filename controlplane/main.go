@@ -82,6 +82,10 @@ func main() {
 	flag.IntVar(&concurrencyNumber, "concurrency", 1,
 		"Number of core resources to process simultaneously")
 
+	var enableInPlaceUpgrades bool
+	flag.BoolVar(&enableInPlaceUpgrades, "enable-inplace-upgrades", false,
+		"Enable the A-minimal in-place upgrade trigger for single-replica control planes when only spec.version differs.")
+
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -109,11 +113,12 @@ func main() {
 
 	ctrPlaneLogger := ctrl.Log.WithName("controllers").WithName("KThreesControlPlane")
 	if err = (&controllers.KThreesControlPlaneReconciler{
-		Client:          mgr.GetClient(),
-		Log:             ctrPlaneLogger,
-		Scheme:          mgr.GetScheme(),
-		EtcdDialTimeout: etcdDialTimeout,
-		EtcdCallTimeout: etcdCallTimeout,
+		Client:                mgr.GetClient(),
+		Log:                   ctrPlaneLogger,
+		Scheme:                mgr.GetScheme(),
+		EtcdDialTimeout:       etcdDialTimeout,
+		EtcdCallTimeout:       etcdCallTimeout,
+		InPlaceUpgradeEnabled: enableInPlaceUpgrades,
 	}).SetupWithManager(ctx, mgr, &ctrPlaneLogger, concurrencyNumber); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "KThreesControlPlane")
 		os.Exit(1)

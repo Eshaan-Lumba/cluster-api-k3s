@@ -73,6 +73,10 @@ type KThreesControlPlaneReconciler struct {
 	EtcdDialTimeout time.Duration
 	EtcdCallTimeout time.Duration
 
+	// InPlaceUpgradeEnabled gates the A-minimal in-place upgrade trigger for
+	// single-replica control planes when only spec.version differs.
+	InPlaceUpgradeEnabled bool
+
 	managementCluster         k3s.ManagementCluster
 	managementClusterUncached k3s.ManagementCluster
 	ssaCache                  ssa.Cache
@@ -572,10 +576,38 @@ func (r *KThreesControlPlaneReconciler) reconcile(ctx context.Context, cluster *
 		return result, err
 	}
 
+	// While an in-place update is in progress, the Machine's spec.version is
+	// still old, so MachinesNeedingRollout keeps flagging it. Wait for the
+	// (v1.12) management-cluster Machine controller to clear the annotation +
+	// hook rather than re-triggering or scaling down.
+	if r.InPlaceUpgradeEnabled && inplaceUpdateInProgress(controlPlane.Machines) {
+		logger.Info("In-place update in progress, waiting for completion")
+		return ctrl.Result{}, nil
+	}
+
 	// Control plane machines rollout due to configuration changes (e.g. upgrades) takes precedence over other operations.
 	needRollout := controlPlane.MachinesNeedingRollout()
+
+	// Report the per-Machine UpToDate condition (mirrors upstream KCP) so the
+	// management cluster and the AKS Arc operator can observe when an in-place
+	// upgrade has completed. Runs on every reconcile that reaches here, including
+	// the one after an in-place update finishes (needRollout becomes empty and
+	// the Machine flips to UpToDate=True). Gated by the in-place feature so
+	// clusters without it keep their existing behavior.
+	if r.InPlaceUpgradeEnabled {
+		if err := r.reconcileMachinesUpToDateConditions(ctx, controlPlane, needRollout); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	switch {
 	case len(needRollout) > 0:
+		// A-minimal: single-replica, version-only diff -> trigger in-place
+		// instead of delete+recreate. Anything else falls through to rollout.
+		if r.InPlaceUpgradeEnabled && isSingleReplicaVersionOnlyRollout(controlPlane, needRollout) {
+			logger.Info("Triggering in-place upgrade (single-replica, version-only)", "needRollout", needRollout.Names())
+			return r.triggerInPlaceVersionUpdate(ctx, controlPlane, needRollout.Oldest())
+		}
 		logger.Info("Rolling out Control Plane machines", "needRollout", needRollout.Names())
 		v1beta1conditions.MarkFalse(controlPlane.KCP, controlplanev1.MachinesSpecUpToDateCondition, controlplanev1.RollingUpdateInProgressReason, clusterv1beta1.ConditionSeverityWarning, "Rolling %d replicas with outdated spec (%d replicas up to date)", len(needRollout), len(controlPlane.Machines)-len(needRollout))
 		return r.upgradeControlPlane(ctx, cluster, kcp, controlPlane, needRollout)
